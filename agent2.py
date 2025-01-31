@@ -65,12 +65,12 @@ class Agent:
         self.client = OpenAI(api_key=api_key, base_url=api_url)
         self.model = model
         self.temperature = 0.0
-        self.past_states = deque(maxlen=6)  # [state, response]
+        self.past_states = deque(maxlen=8)  # [state, response]
         self.current_step = 0
-        self.trajectory = deque(maxlen=20)  # location
         self.current_location = [0, 0]
         self.object_memory = []
         self.object_id_counter = count(1)  # Unique object ID generator
+        self.cot_repeat = 6
 
         # System prompt to explain the task
 
@@ -136,7 +136,7 @@ class Agent:
             action_idx: The index of the action taken.
         """
         # If the last action was move forward but a wall is in front, don't update location
-        if action_idx == 2 and obs["image"][3, 5, 0] in [2, 5, 6, 7]:
+        if action_idx == 2 and obs["image"][3, 5, 0] in [2, 4, 5, 6, 7]:
             return  # Wall detected, ignore movement
         
         if action_idx == 2:  # Move Forward
@@ -169,12 +169,6 @@ class Agent:
             elif self.current_direction == "west":
                 self.current_direction = "north"
 
-        # # movement memory
-        # self.trajectory += [
-        #     f"""\n[ Step {self.current_step}]\n Location: x: {self.current_location[0]} y: {self.current_location[1]}""",
-        #     f"""\nAction: {ACTION_MAP[action_idx]}""",
-        #     f"""\nDirection: {self.current_direction}"""
-        #     ]
 
     def find_last_action(self, action_text, action_map):
         action_idx = None
@@ -194,13 +188,28 @@ class Agent:
 
         return action_idx, found_action
 
-    def get_system_prompt(self, direction):
-        return f"""You are an agent in a grid-world environment. The goal is to navigate the world and interact with objects to complete the mission.
-How You Should Think:
+    def get_CoT_prompt(self):
+        return """
+        How You Should Think and provide a step-by-step reasoning:
 1. Analyze the Environment: Consider your direction, surroundings, walls, and visible objects.
 2. Recall Known Objects: Use your memory of previously seen objects and their relation to your current absolute location to decide the best course of action.
 3. Follow the Rules: Avoid illegal moves (e.g., moving into a wall, standing still too long, stepping on objects).
 4. Plan Your Next Move Determine the best action based on your analysis.
+"""
+
+    def get_CoT_prompt_with_math(self):
+        return """
+        How You Should Think and provide a step-by-step reasoning:
+1. Analyze the Environment: Consider your direction, surroundings, walls, and visible objects.
+2. Recall Known Objects: Use your memory of previously seen objects and their relation to your current absolute location to decide the best course of action.
+3. Follow the Rules: Avoid illegal moves (e.g., moving into a wall, standing still too long, stepping on objects).
+4. after reasoning you should have selected an object to head to, then calculate absolut distance from current location and object location, and the rotation difference between current direction and direction from current location to the object, and try to use this information to aid the action decision.
+5. Plan Your Next Move Determine the best action based on your analysis.
+"""
+
+
+    def get_system_prompt(self, direction):
+        return f"""You are an agent in a grid-world environment. The goal is to navigate the world and interact with objects to complete the mission.
 
 You must choose one of these actions:
 - turn left (rotates towards {relative_to_absolute(direction, 'left')})
@@ -211,11 +220,7 @@ You must choose one of these actions:
 - toggle (opens a door with a key or opens a box)
 
 Additional information:
-- You can interact (reach, goto) objects by facing them (exactly one cell in front of you).
-- If you detect an object of interest (only on Sensor on the left or right) you can rotate to face it, which will allow you to ineract with it (reach, goto, or any action after).
-- Objects that are left/right AND front of you are not directly in front of you. 
 - You can face FOUR different directions: north, south, east, west
-- You are not allowed to select forward if you are facing a wall (Wall in front (blocking): yes)
 - You cannot step on objects, you need to go around them
 - Locked doors can be toggled with a key, if they are one cell in front of you
 - Keys can be picked up
@@ -224,7 +229,23 @@ Additional information:
 - You can pick up and toggle only actionable objects (exactly one cell in front of you)
 - If you don't see target object, explore the world to find it.
 
-What should you do next? Think carefully, then conclude with 'Final Action:' followed by your choice."""
+
+What should you do next? Conclude with 'Final Action:' followed by your choice."""
+
+# - You can interact (reach, goto) objects by facing them (exactly one cell in front of you).
+# - You can face FOUR different directions: north, south, east, west
+# - You should focus on the mission object if it was very near to you.
+# - You cannot step on objects, you need to go around them
+# - If interest object is exactly left or right focus on rotating to correct direction if you need to reach
+# - If the path is clear to the wanted interaction object, you should move in optimal distance way.
+# - You are not allowed to select forward if you are facing a wall (Wall in front (blocking): yes)
+# - You are should not stay in the same place for a long time and repeat old actions.
+# - Locked doors can be toggled with a key, if they are one cell in front of you
+# - Keys can be picked up
+# - Box can contain a key or another object
+# - Box can be toggled to reveal its content if it's one cell in front of you
+# - You can pick up and toggle only actionable objects (exactly one cell in front of you)
+# - If you don't see target object, explore the world to find it.
 
     def parse_observation(self, obs: Dict[str, Any], mission: str) -> str:
         """
@@ -262,17 +283,20 @@ What should you do next? Think carefully, then conclude with 'Final Action:' fol
                     obj_state = ""
                     if obj_id == 4:  # it's a door
                         obj_state = f"state: {IDX_TO_STATE[door_state]} "
-                    obj_repr = f"\n * [object: {obj_memory_id}] color: {object_color} type: {object_name} {obj_state} -"
+                    obj_repr = f"\n * [object: {obj_memory_id}] color: {object_color} type: {object_name} {obj_state} is "
 
                     obj_pos = ""
-                    if x < 3:
-                        obj_pos += f" {3 - x} cells to the left"
-                    elif x > 3:
-                        obj_pos += f" {x - 3} cells to the right"
                     if y < 6:
+                        obj_pos += f" {6 - y} cells in the front"
+                    if x < 3:
                         if obj_pos != "":
                             obj_pos += " AND"
-                        obj_pos += f" {6 - y} cells in the front"
+                        obj_pos += f" {3 - x} cells to the left"
+                    elif x > 3:
+                        if obj_pos != "":
+                            obj_pos += " AND"
+                        obj_pos += f" {x - 3} cells to the right"
+                    
                     obj_repr = obj_repr + obj_pos
                     visible_objects.append(obj_repr)
 
@@ -302,21 +326,25 @@ What should you do next? Think carefully, then conclude with 'Final Action:' fol
         # Format known objects memory
         memory_str = "Known objects:\n" + "\n".join(
             [
-                f"[{obj['id']}] {obj['color']} {obj['name']} at {obj['absolute location']}"
+                f"[object {obj['id']}] {obj['color']} {obj['name']} at absolute location: {obj['absolute location'][0]} on the x axis and {obj['absolute location'][1]} on the y axis"
                 for obj in self.object_memory
             ]
         ) or "none"
         current_state = f"""[Step {self.current_step}]
 - Facing '{direction}'
-- Absolute location: [x: {self.current_location[0]} y: {self.current_location[1]}]
-- Sensor in the left detect: {IDX_TO_OBJECT[grid[2, 6, 0]]}
-- Sensor in the right detect: {IDX_TO_OBJECT[grid[4, 6, 0]]}
-- Sensor in the front detect: {IDX_TO_OBJECT[grid[3, 5, 0]]}
+- Absolute location: [{self.current_location[0]} on the x axis and {self.current_location[1]} on the y axis]
+- Sensor in the left is detecting: {IDX_TO_OBJECT[grid[2, 6, 1]]} {IDX_TO_OBJECT[grid[2, 6, 0]]} on the left
+- Sensor in the right detect: {IDX_TO_OBJECT[grid[4, 6, 1]]} {IDX_TO_OBJECT[grid[4, 6, 0]]} on the right
+- Sensor in the front detect: {IDX_TO_OBJECT[grid[3, 5, 1]]} {IDX_TO_OBJECT[grid[3, 5, 0]]} facing you
 - Wall in front (blocking): {"yes" if grid[3, 5, 0] == 2 else "no"}
 - Visible objects: {', '.join(visible_objects) if visible_objects else 'none'}
 - Actionable object: {actionable_object}
 - Holding object: {holding_object}
 - Mission: {mission}"""
+#         current_state = f"""[Step {self.current_step}]
+# - Absolute location: [{self.current_location[0]} on the x axis and {self.current_location[1]} on the y axis]
+# """
+
         prompt = f"""Recent states:
 {past_states_str}
 {memory_str}
@@ -337,8 +365,10 @@ Response:"""
             Action index
         """
         prompt, current_state, direction = self.parse_observation(obs, mission)
-        
-        final_prompt = f"{self.get_system_prompt(direction)}\n\n{prompt}"
+        if self.current_step % self.cot_repeat == 0:
+            final_prompt = f"{self.get_system_prompt(direction)}\n{self.get_CoT_prompt()}\n{prompt}"
+        else:
+            final_prompt = f"{self.get_system_prompt(direction)}\n\n{prompt}"
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -370,7 +400,7 @@ Response:"""
 
         self.past_states += [
             current_state,
-            f"Response: {action_text}",
+            f"Response: {full_response if self.current_step % self.cot_repeat else action_text}",
         ]
         self.current_step += 1
 
