@@ -2,7 +2,7 @@ import gymnasium as gym
 import argparse
 import os
 import time
-from agent import Agent, handle_state, ACTION_MAP
+from agent2 import Agent, handle_state, ACTION_MAP
 import json
 import datetime
 from pathlib import Path
