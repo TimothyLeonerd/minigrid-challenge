@@ -52,7 +52,8 @@ def relative_to_absolute(agent_direction, relative_direction):
 
 class Agent:
     def __init__(
-        self, api_key: str, model: str = "gpt-4o-mini", api_url: Optional[str] = None
+        self, api_key: str, model: str = "gpt-4o-mini", api_url: Optional[str] = None, 
+        use_absolute_location=True, use_object_memory=True, use_cot=True, use_math_cot=False
     ):
         """
         Initialize the agent.
@@ -71,7 +72,10 @@ class Agent:
         self.object_memory = []
         self.object_id_counter = count(1)  # Unique object ID generator
         self.cot_repeat = 6
-
+        self.use_absolute_location=use_absolute_location 
+        self.use_object_memory=use_object_memory
+        self.use_cot=use_cot
+        self.use_math_cot=use_math_cot
         # System prompt to explain the task
 
     def calculate_absolute_position(self, rel_x, rel_y):
@@ -279,7 +283,10 @@ What should you do next? Conclude with 'Final Action:' followed by your choice."
                     rel_x = 3 - x
                     rel_y = 6 - y
                     # Update memory and get object ID
-                    obj_memory_id = self.update_memory(object_name, object_color, rel_x, rel_y)
+                    if self.use_object_memory:
+                        obj_memory_id = self.update_memory(object_name, object_color, rel_x, rel_y)
+                    else:
+                        obj_memory_id = ""
                     obj_state = ""
                     if obj_id == 4:  # it's a door
                         obj_state = f"state: {IDX_TO_STATE[door_state]} "
@@ -323,16 +330,17 @@ What should you do next? Conclude with 'Final Action:' followed by your choice."
 
         # Create the prompt
         past_states_str = "\n".join(self.past_states)
-        # Format known objects memory
-        memory_str = "Known objects:\n" + "\n".join(
-            [
-                f"[object {obj['id']}] {obj['color']} {obj['name']} at absolute location: {obj['absolute location'][0]} on the x axis and {obj['absolute location'][1]} on the y axis"
-                for obj in self.object_memory
-            ]
-        ) or "none"
+        if self.use_object_memory:
+            # Format known objects memory
+            memory_str = "Known objects:\n" + "\n".join(
+                [
+                    f"[object {obj['id']}] {obj['color']} {obj['name']} at absolute location: {obj['absolute location'][0]} on the x axis and {obj['absolute location'][1]} on the y axis"
+                    for obj in self.object_memory
+                ]
+            ) or "none"
         current_state = f"""[Step {self.current_step}]
 - Facing '{direction}'
-- Absolute location: [{self.current_location[0]} on the x axis and {self.current_location[1]} on the y axis]
+{"- Absolute location: [" +str(self.current_location[0]) + " on the x axis and " + str(self.current_location[1]) + " on the y axis]" if self.use_absolute_location else ""}
 - Sensor in the left is detecting: {IDX_TO_OBJECT[grid[2, 6, 1]]} {IDX_TO_OBJECT[grid[2, 6, 0]]} on the left
 - Sensor in the right detect: {IDX_TO_OBJECT[grid[4, 6, 1]]} {IDX_TO_OBJECT[grid[4, 6, 0]]} on the right
 - Sensor in the front detect: {IDX_TO_OBJECT[grid[3, 5, 1]]} {IDX_TO_OBJECT[grid[3, 5, 0]]} facing you
@@ -347,7 +355,7 @@ What should you do next? Conclude with 'Final Action:' followed by your choice."
 
         prompt = f"""Recent states:
 {past_states_str}
-{memory_str}
+{memory_str if self.use_object_memory else ""}
 {current_state}
 Response:"""
 
@@ -365,7 +373,9 @@ Response:"""
             Action index
         """
         prompt, current_state, direction = self.parse_observation(obs, mission)
-        if self.current_step % self.cot_repeat == 0:
+        if self.use_math_cot and self.current_step % self.cot_repeat == 0:
+            final_prompt = f"{self.get_system_prompt(direction)}\n{self.get_CoT_prompt_with_math()}\n{prompt}"
+        elif self.use_cot and self.current_step % self.cot_repeat == 0:
             final_prompt = f"{self.get_system_prompt(direction)}\n{self.get_CoT_prompt()}\n{prompt}"
         else:
             final_prompt = f"{self.get_system_prompt(direction)}\n\n{prompt}"
@@ -382,8 +392,8 @@ Response:"""
             print("==================================")
             print("final_prompt:\n", final_prompt)
             print("response:\n", response.choices[0].message.content)
+        full_response = str(response.choices[0].message.content).strip().lower()
 
-        full_response = response.choices[0].message.content.strip().lower()
         # Extract the action after "Final Action:"
         action_idx, action_text = None, None
         if "final action:" in full_response:
@@ -400,17 +410,16 @@ Response:"""
 
         self.past_states += [
             current_state,
-            f"Response: {full_response if self.current_step % self.cot_repeat else action_text}",
+            f"Response: {full_response if self.current_step % self.cot_repeat == 0 else action_text}",
         ]
         self.current_step += 1
-
         # **Update Location and Direction**
         self.update_location(action_idx, obs)
         
         # dict with metadata to log during eval
         metadata = {
             "final_prompt": final_prompt,
-            "response": response,
+            "response": full_response,
             "action_text": action_text,
         }
 

@@ -70,6 +70,30 @@ def parse_args():
         default=None,
         help="URL for the local model API, e.g. http://localhost:8081/v1. Leave empty to use OpenAI API",
     )
+    parser.add_argument(
+        "--use-absolute-location",
+        type=lambda x: (str(x).lower() == 'true'),
+        default=True,
+        help="If True, calculate robot absolute position from the moment he starts at 0,0",
+    )
+    parser.add_argument(
+        "--use-object-memory",
+        type=lambda x: (str(x).lower() == 'true'),
+        default=True,
+        help="If True, store objects with their absolute position as the robot explores",
+    )
+    parser.add_argument(
+        "--use-cot",
+        type=lambda x: (str(x).lower() == 'true'),
+        default=True,
+        help="If True, use Chain of Thought reasoning every 6 steps",
+    )
+    parser.add_argument(
+        "--use-math-cot",
+        type=lambda x: (str(x).lower() == 'true'),
+        default=False,
+        help="If True, use Chain of Thought reasoning with calculations about distance and orientation from the current robot position to the object of interest every 6 steps",
+    )
 
     return parser.parse_args()
 
@@ -145,7 +169,10 @@ def main():
     # Run episodes
     for episode in range(args.episodes):
         # Initialize agent
-        agent = Agent(api_key=api_key, model=args.model, api_url=args.api_url)
+        agent = Agent(api_key=api_key, model=args.model, api_url=args.api_url,
+                      use_absolute_location=args.use_absolute_location, 
+                      use_object_memory=args.use_object_memory,
+                      use_cot=args.use_cot, use_math_cot=args.use_math_cot)
 
         if args.verbose:
             print(f"\nStarting Episode {episode + 1}")
